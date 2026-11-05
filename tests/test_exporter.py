@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import exporter  # noqa: E402
+from spotipy.exceptions import SpotifyException  # noqa: E402
 
 
 def art(i, name, genres):
@@ -11,7 +12,7 @@ def art(i, name, genres):
 
 
 A = {"a1": art("a1", "Band A", ["post-punk", "indie"]), "a2": art("a2", "Band B", ["indie"]),
-     "a3": art("a3", "Band C", [])}
+     "a3": art("a3", "Band C", []), "a4": art("a4", "Band D", ["shoegaze"])}
 
 
 def track(i, artist_ids):
@@ -36,7 +37,8 @@ class FakeSP:
         return {"artists": {"items": [A["a3"]], "cursors": {"after": None}}}
 
     def current_user_saved_tracks(self, limit):
-        return {"items": [{"track": track("t1", ["a1"])}, {"track": track("t2", ["a1", "a2"])}, {"track": None}],
+        return {"items": [{"track": track("t1", ["a1"])}, {"track": track("t2", ["a1", "a2"])},
+                          {"track": track("t4", ["a4"])}, {"track": None}],
                 "next": None}
 
     def current_user(self):
@@ -49,9 +51,14 @@ class FakeSP:
     def playlist(self, pid):
         return {"items": {"items": [{"item": track("t3", ["a2"])}, {"item": None}], "next": None}}
 
-    def artists(self, ids):
-        assert len(ids) <= 50
-        return {"artists": [A.get(i) for i in ids]}
+    def artists(self, ids):  # Sammel-Endpunkt: bei Dev-Mode-Apps 403
+        raise SpotifyException(403, -1, "Forbidden")
+
+    def artist(self, aid):
+        self.single_calls.append(aid)
+        return A[aid]
+
+    single_calls = []
 
 
 def test_full_run(tmp_path):
@@ -77,5 +84,7 @@ def test_full_run(tmp_path):
     assert [r["track"] for r in rows("playlists.csv")] == ["Tt3"]  # nur eigene Playlist
     g = {r["genre"]: float(r["weight"]) for r in rows("g.csv")}
     # indie: top a1 + top a2 + liked(t1:a1, t2:a1, t2:a2) + playlist(a2) = 1+1+2+1+1 = 6; post-punk: 1+2 = 3
-    assert g == {"indie": 6.0, "post-punk": 3.0}
-    assert len(rows("liked_tracks.csv")) == 2  # None-Track übersprungen
+    # shoegaze: nur über Einzelabfrage (a4 steht weder in Top noch Followed) -> Fallback greift
+    assert g == {"indie": 6.0, "post-punk": 3.0, "shoegaze": 1.0}
+    assert FakeSP.single_calls == ["a4"]  # Top/Followed-Künstler werden nicht erneut abgefragt
+    assert len(rows("liked_tracks.csv")) == 3  # None-Track übersprungen

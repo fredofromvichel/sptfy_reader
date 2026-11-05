@@ -55,6 +55,8 @@ class Fetcher:
         self.sp = sp
         self._cache = {}
         self._artist_cache = {}
+        self._batch_ok = True
+        self._single_fail = 0
 
     def _paged(self, page):
         """Iteriert über alle Seiten eines Spotify-Paging-Objekts."""
@@ -66,6 +68,7 @@ class Fetcher:
         k = ("top_artists", time_range, limit)
         if k not in self._cache:
             self._cache[k] = list(self._paged(self.sp.current_user_top_artists(limit=min(limit, 50), time_range=time_range)))[:limit]
+            self.remember_artists(self._cache[k])
         return self._cache[k]
 
     def top_tracks(self, time_range, limit=50):
@@ -83,6 +86,7 @@ class Fetcher:
                 after = res.get("cursors", {}).get("after")
                 if not after or not res["items"]:
                     break
+            self.remember_artists(out)
             self._cache["followed"] = out
         return self._cache["followed"]
 
@@ -128,13 +132,51 @@ class Fetcher:
         self._cache[k] = result
         return result
 
-    def artists_by_id(self, ids):
-        """Voll-Objekte (mit Genres) zu Artist-IDs, in 50er-Batches."""
+    def remember_artists(self, artists):
+        """Künstler-Objekte mit Genres (Top/Followed) vormerken, spart Zusatzabfragen."""
+        for a in artists:
+            if a and a.get("id") and "genres" in a:
+                self._artist_cache[a["id"]] = a
+
+    def _artist_single(self, aid):
+        from spotipy.exceptions import SpotifyException
+        try:
+            return self.sp.artist(aid)
+        except SpotifyException as exc:
+            if exc.http_status in (403, 404):
+                self._single_fail += 1
+                return None
+            raise
+
+    def artists_by_id(self, ids, max_new=None):
+        """Objekte (mit Genres) zu Artist-IDs. `ids` nach Wichtigkeit sortiert; max_new begrenzt Nachschlagungen.
+
+        Spotify hat den Sammel-Endpunkt GET /artists für Dev-Mode-Apps abgeschaltet (403) -> Fallback auf
+        Einzelabfragen."""
+        from spotipy.exceptions import SpotifyException
         missing = [i for i in dict.fromkeys(ids) if i and i not in self._artist_cache]
+        if max_new is not None and len(missing) > max_new:
+            log.info("%d Künstler ohne Genre-Info, schlage nur die %d wichtigsten nach.", len(missing), max_new)
+            missing = missing[:max_new]
         for n in range(0, len(missing), 50):
-            for a in self.sp.artists(missing[n:n + 50])["artists"]:
-                if a:
-                    self._artist_cache[a["id"]] = a
+            chunk = missing[n:n + 50]
+            res = None
+            if self._batch_ok:
+                try:
+                    res = self.sp.artists(chunk)["artists"]
+                except SpotifyException as exc:
+                    if exc.http_status not in (403, 404):
+                        raise
+                    log.warning("Sammelabfrage /artists nicht verfügbar (%s) - nutze Einzelabfragen.", exc.http_status)
+                    self._batch_ok = False
+            if res is None:
+                res = []
+                for aid in chunk:
+                    res.append(self._artist_single(aid))
+                    if self._single_fail >= 10 and not self._artist_cache:
+                        log.warning("Künstler-Abfragen werden abgelehnt (403) - Genres nur aus Top/Followed.")
+                        return {i: self._artist_cache[i] for i in ids if i in self._artist_cache}
+            self.remember_artists(res)
         return {i: self._artist_cache[i] for i in ids if i in self._artist_cache}
 
 
@@ -206,7 +248,7 @@ def export_genres(f, opt):
         else:
             sys.exit(f"genres: unbekannte Quelle '{src}'")
 
-    info = f.artists_by_id(list(weight))
+    info = f.artists_by_id([aid for aid, _ in weight.most_common()], opt.get("max_artist_lookups", 300))
     genre_w, genre_artists = Counter(), defaultdict(Counter)
     for aid, w in weight.items():
         a = info.get(aid)
