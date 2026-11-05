@@ -14,7 +14,7 @@ docker run --rm -it --env-file .env -v "$PWD/data:/data" spotify-style-export
 ```
 - **Erster Lauf:** URL aus dem Terminal im Browser öffnen, zustimmen, die (nicht ladbare) Redirect-URL aus der Adressleiste ins Terminal einfügen. Token liegt danach in `data/.spotify-token` – weitere Läufe ohne Login (`-it` dann nicht mehr nötig).
 - **Vorgabe:** `data/spec.yaml` (wird beim ersten Start aus `spec.example.yaml` angelegt). Ergebnisse unter `data/out/`.
-- **Update beim Start:** `spotipy`/`pyyaml` werden aktualisiert (offline: letzter Stand). Optional Tool-Code aus Git: `-e TOOL_REPO=https://… [-e TOOL_REF=main]`. Abschalten: `-e SKIP_UPDATE=1`.
+- **Update beim Start:** `spotipy`/`pyyaml` werden aktualisiert (offline: letzter Stand). Tool-Code kommt per `git pull` aus `TOOL_REPO` (im Dockerfile auf dieses Repo gesetzt; überschreibbar mit `-e TOOL_REPO=…` / `-e TOOL_REF=main`, leer lassen = eingebauter Code). Abschalten: `-e SKIP_UPDATE=1`.
 
 ## Ausgabe (CSV)
 `top_artists_<range>.csv`, `top_tracks_<range>.csv`, `genres.csv` (Genre, Gewicht, Anteil %, Beispiel-Künstler), `liked_tracks.csv`, `followed_artists.csv`, `playlists.csv` – Namen/Pfade/Quellen in der Spec änderbar.

@@ -7,6 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY exporter.py spec.example.yaml entrypoint.sh ./
 RUN chmod +x entrypoint.sh
-ENV DATA_DIR=/data PYTHONUNBUFFERED=1
+ENV DATA_DIR=/data PYTHONUNBUFFERED=1 \
+    TOOL_REPO=https://github.com/fredofromvichel/sptfy_reader
 VOLUME /data
 ENTRYPOINT ["/app/entrypoint.sh"]
