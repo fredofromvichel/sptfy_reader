@@ -1,0 +1,36 @@
+# Vorgabe: was wird exportiert und wo landet es?
+# Liegt als /data/spec.yaml im gemounteten Ordner (wird beim ersten Start automatisch angelegt).
+
+output_dir: /data/out     # Zielordner (relativ = unterhalb /data/out)
+delimiter: ","            # ";" für deutsches Excel
+
+exports:
+  # Meistgehörte Künstler/Titel. time_range: short_term (~4 Wochen), medium_term (~6 Monate), long_term (~1 Jahr)
+  top_artists:
+    time_ranges: [short_term, medium_term, long_term]
+    limit: 50
+    file: "top_artists_{time_range}.csv"
+  top_tracks:
+    time_ranges: [short_term, medium_term, long_term]
+    limit: 50
+    file: "top_tracks_{time_range}.csv"
+
+  # Genre-Häufigkeiten; Genres hängen am Künstler, Gewicht = Anzahl Treffer über alle Quellen.
+  # Quellen: top_artists, liked_tracks, followed_artists, playlists
+  genres:
+    sources: [top_artists, liked_tracks, followed_artists]
+    time_ranges: [long_term]   # nur relevant für Quelle top_artists
+    top_n: 50
+    file: genres.csv
+
+  liked_tracks:
+    limit: 2000
+    file: liked_tracks.csv
+
+  followed_artists:
+    file: followed_artists.csv
+
+  playlists:
+    enabled: true
+    own_only: true             # nur eigene Playlists (gefolgte Fremd-Playlists verzerren den Geschmack)
+    file: playlists.csv
