@@ -73,7 +73,7 @@ def test_full_run(tmp_path):
             "top_artists": {"time_ranges": ["short_term", "long_term"]},
             "top_tracks": {},
             "genres": {"sources": ["top_artists", "liked_tracks", "followed_artists", "playlists"], "file": "g.csv"},
-            "liked_tracks": {"limit": 10},
+            "liked_tracks": {},
             "followed_artists": {},
             "playlists": {},
         },

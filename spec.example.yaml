@@ -23,8 +23,7 @@ exports:
     top_n: 50
     file: genres.csv
 
-  liked_tracks:
-    limit: 2000
+  liked_tracks:             # alle gelikten Songs; optional `limit: N` begrenzt auf die N neuesten
     file: liked_tracks.csv
 
   followed_artists:

@@ -102,7 +102,7 @@ class Fetcher:
             out = []
             for rec in self._paged(self.sp.current_user_saved_tracks(limit=50)):
                 if rec.get("track"):
-                    out.append(rec["track"])
+                    out.append({**rec["track"], "_added_at": rec.get("added_at", "")})
                 if limit and len(out) >= limit:
                     break
             self._cache[k] = out
@@ -221,10 +221,11 @@ def export_followed_artists(f, opt):
 def export_liked_tracks(f, opt):
     rows = [
         {"track": t["name"], "artists": _artists(t), "album": t.get("album", {}).get("name", ""),
-         "release_date": t.get("album", {}).get("release_date", "")}
-        for t in f.liked_tracks(opt.get("limit"))
+         "release_date": t.get("album", {}).get("release_date", ""), "added_at": t.get("_added_at", ""),
+         "url": (t.get("external_urls") or {}).get("spotify", "")}
+        for t in f.liked_tracks(opt.get("limit"))  # ohne limit: alle
     ]
-    return ["track", "artists", "album", "release_date"], rows
+    return ["track", "artists", "album", "release_date", "added_at", "url"], rows
 
 
 def export_playlists(f, opt):
