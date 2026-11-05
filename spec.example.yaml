@@ -15,11 +15,16 @@ exports:
     limit: 50
     file: "top_tracks_{time_range}.csv"
 
-  # Genre-Häufigkeiten; Genres hängen am Künstler, Gewicht = Anzahl Treffer über alle Quellen.
-  # Quellen: top_artists, liked_tracks, followed_artists, playlists
+  # Genre-Häufigkeiten. Spotify liefert Genres für Dev-Mode-Apps unzuverlässig -> Standard ist Last.fm-Tags
+  # (braucht LASTFM_API_KEY). Gewicht = Anzahl Treffer des Künstlers über alle Quellen x Tag-Anteil.
   genres:
-    sources: [top_artists, liked_tracks, followed_artists]
+    source: lastfm             # lastfm | spotify | auto (Spotify-Genres, sonst Last.fm)
+    sources: [top_artists, liked_tracks, followed_artists]   # + playlists
     time_ranges: [long_term]   # nur relevant für Quelle top_artists
+    max_artist_lookups: 300    # nur die wichtigsten N Künstler auswerten (Last.fm: ~4/s, Ergebnisse werden gecacht)
+    min_tag_count: 40          # Last.fm-Tag-Stärke 0-100; höher = weniger, treffendere Genres
+    max_tags_per_artist: 5
+    exclude_tags: []           # zusätzliche Tags ignorieren, z. B. ["german", "sad"]
     top_n: 50
     file: genres.csv
 

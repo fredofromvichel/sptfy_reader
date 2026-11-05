@@ -2,10 +2,13 @@
 """Spotify-Stil-Export: liest Daten aus Spotify und legt sie gemäß spec.yaml als CSV ab."""
 import argparse
 import csv
+import json
 import logging
 import os
+import re
 import shutil
 import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -192,6 +195,88 @@ class Fetcher:
         return {i: self._artist_cache[i] for i in ids if i in self._artist_cache}
 
 
+# ----------------------------------------------------------------- Last.fm
+# Beliebte, aber stilistisch wertlose Tags
+DEFAULT_EXCLUDE_TAGS = {
+    "seen live", "favorites", "favorite", "favourites", "favourite", "love", "awesome", "amazing", "good",
+    "beautiful", "great", "best", "all", "my music", "albums i own", "owned", "spotify", "under 2000 listeners",
+    "male vocalists", "female vocalists", "male vocalist", "female vocalist", "british", "american", "german",
+    "usa", "uk", "swedish", "canadian", "french", "australian",
+}
+
+
+class LastFm:
+    """artist.getTopTags mit Datei-Cache (Name -> [[tag, count], ...])."""
+
+    URL = "https://ws.audioscrobbler.com/2.0/"
+
+    def __init__(self, api_key, cache_path: Path, delay=0.25):
+        self.api_key, self.cache_path, self.delay = api_key, Path(cache_path), delay
+        try:
+            self.cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.cache = {}
+        self._dirty = 0
+
+    def save(self):
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(json.dumps(self.cache, ensure_ascii=False), encoding="utf-8")
+            self._dirty = 0
+        except OSError as exc:
+            log.warning("Last.fm-Cache nicht schreibbar: %s", exc)
+
+    def top_tags(self, artist):
+        key = artist.casefold()
+        if key in self.cache:
+            return self.cache[key]
+        import requests
+        tags = None
+        for attempt in range(4):
+            try:
+                r = requests.get(self.URL, timeout=15, headers={"User-Agent": "sptfy_reader/1.0"}, params={
+                    "method": "artist.gettoptags", "artist": artist, "autocorrect": 1,
+                    "api_key": self.api_key, "format": "json"})
+                data = r.json()
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("Last.fm-Fehler bei '%s': %s", artist, exc)
+                time.sleep(2 ** attempt)
+                continue
+            err = data.get("error")
+            if err in (10, 26):  # ungültiger/gesperrter Key -> sinnlos weiterzumachen
+                self.save()
+                sys.exit(f"Last.fm: {data.get('message')} (LASTFM_API_KEY prüfen)")
+            if err in (8, 11, 16, 29):  # temporär / Rate-Limit
+                time.sleep(2 ** attempt)
+                continue
+            if err:  # z. B. 6 = Künstler unbekannt -> leer cachen
+                tags = []
+            else:
+                tags = [[t["name"].strip().lower(), int(t.get("count", 0))]
+                        for t in (data.get("toptags", {}).get("tag") or [])[:15]]
+            break
+        if tags is None:
+            return []  # nicht cachen, nächster Lauf versucht es erneut
+        self.cache[key] = tags
+        self._dirty += 1
+        if self._dirty >= 25:
+            self.save()
+        time.sleep(self.delay)
+        return tags
+
+
+def pick_tags(tags, artist, min_count, max_tags, exclude):
+    """Filtert Roh-Tags: Mindest-Count, Blocklist, Künstlername, reine Jahreszahlen."""
+    out = []
+    for name, count in tags:
+        if count < min_count or name in exclude or name == artist.casefold() or re.fullmatch(r"\d{4}", name):
+            continue
+        out.append((name, count))
+        if len(out) >= max_tags:
+            break
+    return out
+
+
 # ----------------------------------------------------------------- Exporte
 def _artists(track):
     return ", ".join(a.get("name") or "?" for a in track.get("artists") or [] if a)
@@ -238,47 +323,85 @@ def export_playlists(f, opt):
 
 
 def export_genres(f, opt):
-    """Genre-Häufigkeiten. Jede Quelle gibt Künstlern Gewicht; Genres stammen vom Künstler."""
+    """Genre-Häufigkeiten. Jede Quelle gibt Künstlern Gewicht; Genres/Tags stammen vom Künstler.
+
+    source: lastfm (Standard) | spotify | auto (Spotify-Genres, sonst Last.fm)."""
+    source = opt.get("source", "lastfm")
+    if source not in ("lastfm", "spotify", "auto"):
+        sys.exit(f"genres: unbekannte source '{source}' (lastfm | spotify | auto)")
     sources = opt.get("sources", ["top_artists", "liked_tracks", "followed_artists"])
-    weight = Counter()  # artist_id -> Gewicht
+    weight, names = Counter(), {}  # artist_id -> Gewicht / Name
+
+    def add(a, w=1):
+        if a and a.get("id"):
+            weight[a["id"]] += w
+            names.setdefault(a["id"], a.get("name") or "")
+
     for src in sources:
         if src == "top_artists":
             for tr in opt.get("time_ranges", ["long_term"]):
                 for a in f.top_artists(tr, 50):
-                    weight[a["id"]] += 1
+                    add(a)
         elif src == "followed_artists":
             for a in f.followed_artists():
-                weight[a["id"]] += 1
+                add(a)
         elif src == "liked_tracks":
             for t in f.liked_tracks(opt.get("liked_limit")):
-                for a in t.get("artists", []):
-                    weight[a["id"]] += 1
+                for a in t.get("artists") or []:
+                    add(a)
         elif src == "playlists":
             for _, tracks in f.playlists(opt.get("own_only", True)):
                 for t in tracks:
-                    for a in t.get("artists", []):
-                        weight[a["id"]] += 1
+                    for a in t.get("artists") or []:
+                        add(a)
         else:
             sys.exit(f"genres: unbekannte Quelle '{src}'")
 
-    info = f.artists_by_id([aid for aid, _ in weight.most_common()], opt.get("max_artist_lookups", 300))
-    log.info("Genre-Info vorhanden für %d von %d Künstlern", sum(1 for a in info.values() if a.get("genres")), len(weight))
+    ranked = [aid for aid, _ in weight.most_common()]
+    limit = opt.get("max_artist_lookups", 300)
+    if len(ranked) > limit:
+        log.info("%d Künstler gefunden, werte die %d wichtigsten aus (max_artist_lookups).", len(ranked), limit)
+        ranked = ranked[:limit]
+
+    artist_genres = {}  # artist_id -> [(genre, anteil 0..1)]
+    if source in ("spotify", "auto"):
+        info = f.artists_by_id(ranked, limit)
+        for aid in ranked:
+            g = (info.get(aid) or {}).get("genres") or []
+            if g:
+                artist_genres[aid] = [(x, 1.0) for x in g]
+        log.info("Spotify-Genres vorhanden für %d von %d Künstlern", len(artist_genres), len(ranked))
+    if source in ("lastfm", "auto"):
+        todo = [aid for aid in ranked if aid not in artist_genres and names.get(aid)]
+        lf = getattr(f, "lastfm", None)
+        if todo and lf is None:
+            sys.exit("Für Genres via Last.fm fehlt LASTFM_API_KEY (kostenlos: https://www.last.fm/api/account/create).")
+        if todo:
+            exclude = DEFAULT_EXCLUDE_TAGS | {t.lower() for t in opt.get("exclude_tags", [])}
+            min_count, max_tags = opt.get("min_tag_count", 40), opt.get("max_tags_per_artist", 5)
+            log.info("Last.fm: lade Tags für %d Künstler (gecachte sind sofort da) ...", len(todo))
+            for n, aid in enumerate(todo, 1):
+                picked = pick_tags(lf.top_tags(names[aid]), names[aid], min_count, max_tags, exclude)
+                if picked:
+                    artist_genres[aid] = [(g, c / 100) for g, c in picked]
+                if n % 50 == 0:
+                    log.info("    %d/%d", n, len(todo))
+            lf.save()
+        log.info("Genre-Info vorhanden für %d von %d Künstlern", len(artist_genres), len(ranked))
+
     genre_w, genre_artists = Counter(), defaultdict(Counter)
-    for aid, w in weight.items():
-        a = info.get(aid)
-        if not a:
-            continue
-        for g in a.get("genres", []):
-            genre_w[g] += w
-            genre_artists[g][a["name"]] += w
+    for aid, gl in artist_genres.items():
+        for g, share in gl:
+            genre_w[g] += weight[aid] * share
+            genre_artists[g][names.get(aid) or aid] += weight[aid]
     total = sum(genre_w.values()) or 1
     rows = [
-        {"genre": g, "weight": w, "share_pct": round(100 * w / total, 2),
+        {"genre": g, "weight": round(w, 2), "share_pct": round(100 * w / total, 2),
          "top_artists": "; ".join(n for n, _ in genre_artists[g].most_common(5))}
         for g, w in genre_w.most_common(opt.get("top_n", 50))
     ]
     if not rows:
-        log.warning("Keine Genres gefunden (liefert die API für Künstler evtl. keine 'genres' mehr?).")
+        log.warning("Keine Genres gefunden (min_tag_count zu hoch oder Quelle liefert nichts?).")
     return ["genre", "weight", "share_pct", "top_artists"], rows
 
 
@@ -343,6 +466,8 @@ def main():
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
 
     fetcher = Fetcher(make_client(data_dir))
+    if os.getenv("LASTFM_API_KEY"):
+        fetcher.lastfm = LastFm(os.environ["LASTFM_API_KEY"], data_dir / ".lastfm-cache.json")
     written = run(spec, fetcher, data_dir / "out")
     print("\nFertig:")
     for p, n in written:

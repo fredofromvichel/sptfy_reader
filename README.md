@@ -5,7 +5,7 @@ Angelehnt an [Spotify-Jellyfin-Export](https://git.binary-kitchen.de/j0nas/Spoti
 
 ## Einmalig
 1. [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) → App anlegen, Redirect URI `http://127.0.0.1:1337` eintragen.
-2. `cp .env.example .env` und Client ID/Secret eintragen.
+2. `cp .env.example .env` und Client ID/Secret eintragen. Für Genres zusätzlich einen kostenlosen [Last.fm-API-Key](https://www.last.fm/api/account/create) als `LASTFM_API_KEY`.
 3. `docker build -t spotify-style-export .`
 
 ## Start (bei Bedarf)
@@ -21,5 +21,5 @@ docker run --rm -it --env-file .env -v "$PWD/data:/data" spotify-style-export
 
 ## Hinweise
 - Spotify-Apps im Dev-Modus: nur freigeschaltete Nutzer (dein eigener Account reicht).
-- Genres kommen vom Künstler, nicht vom Titel. Liefert die API sie nicht mehr, warnt das Tool und `genres.csv` bleibt leer.
+- Genres kommen standardmäßig von Last.fm (Top-Tags des Künstlers, nutzergepflegt) und nicht von Spotify, dessen Artist-Daten für Dev-Mode-Apps stark eingeschränkt sind. Tags werden in `data/.lastfm-cache.json` gecacht, Folgeläufe sind schnell. `source: spotify|auto` in der Spec schaltet um.
 - Tests: `pip install spotipy pyyaml pytest && pytest`

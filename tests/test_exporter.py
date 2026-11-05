@@ -72,7 +72,7 @@ def test_full_run(tmp_path):
         "exports": {
             "top_artists": {"time_ranges": ["short_term", "long_term"]},
             "top_tracks": {},
-            "genres": {"sources": ["top_artists", "liked_tracks", "followed_artists", "playlists"], "file": "g.csv"},
+            "genres": {"source": "spotify", "sources": ["top_artists", "liked_tracks", "followed_artists", "playlists"], "file": "g.csv"},
             "liked_tracks": {},
             "followed_artists": {},
             "playlists": {},
@@ -93,3 +93,61 @@ def test_full_run(tmp_path):
     assert g == {"indie": 6.0, "post-punk": 3.0, "shoegaze": 1.0}
     assert FakeSP.single_calls == ["a4"]  # Top/Followed-Künstler werden nicht erneut abgefragt
     assert len(rows("liked_tracks.csv")) == 3  # None-Track übersprungen
+
+
+class FakeLastFm:
+    TAGS = {"band a": [["post-punk", 100], ["seen live", 90], ["band a", 80], ["1983", 70], ["indie", 30]],
+            "band b": [["indie", 100], ["shoegaze", 50]]}
+    calls = []
+
+    def top_tags(self, artist):
+        self.calls.append(artist)
+        return self.TAGS.get(artist.casefold(), [])
+
+    def save(self):
+        pass
+
+
+def test_pick_tags_filters_noise():
+    tags = FakeLastFm.TAGS["band a"]
+    got = exporter.pick_tags(tags, "Band A", 40, 5, exporter.DEFAULT_EXCLUDE_TAGS)
+    assert got == [("post-punk", 100)]  # seen live, Künstlername, Jahr, zu niedriger Count rausgefiltert
+
+
+def test_genres_via_lastfm(tmp_path):
+    f = exporter.Fetcher(FakeSP())
+    f.lastfm = FakeLastFm()
+    headers, rows = exporter.export_genres(f, {"sources": ["top_artists"], "time_ranges": ["long_term"]})
+    g = {r["genre"]: r["weight"] for r in rows}
+    # Band A (Gewicht 1): post-punk 1.0 | Band B: indie 1.0, shoegaze 0.5
+    assert g == {"post-punk": 1.0, "indie": 1.0, "shoegaze": 0.5}
+    assert sorted(FakeLastFm.calls) == ["Band A", "Band B"]  # Spotify-Artist-Endpunkt wird nicht angefasst
+
+
+def test_lastfm_http_cache_and_errors(tmp_path, monkeypatch):
+    import requests
+
+    calls = []
+
+    class Resp:
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    def fake_get(url, params, **kw):
+        calls.append(params["artist"])
+        if params["artist"] == "Nobody":
+            return Resp({"error": 6, "message": "The artist you supplied could not be found"})
+        return Resp({"toptags": {"tag": [{"name": "Post-Punk", "count": 100}, {"name": "Seen Live", "count": "50"}]}})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    lf = exporter.LastFm("key", tmp_path / "c.json", delay=0)
+    assert lf.top_tags("Band A") == [["post-punk", 100], ["seen live", 50]]
+    assert lf.top_tags("band a") == [["post-punk", 100], ["seen live", 50]]  # Cache, case-insensitiv
+    assert lf.top_tags("Nobody") == []
+    assert calls == ["Band A", "Nobody"]
+    lf.save()
+    lf2 = exporter.LastFm("key", tmp_path / "c.json", delay=0)  # Cache überlebt Neustart
+    assert lf2.top_tags("Nobody") == [] and calls == ["Band A", "Nobody"]
