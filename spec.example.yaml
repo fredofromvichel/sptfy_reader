@@ -3,6 +3,7 @@
 
 output_dir: /data/out     # Zielordner (relativ = unterhalb /data/out)
 delimiter: ","            # ";" für deutsches Excel
+cache_hours: 24           # Spotify-Daten so lange wiederverwenden (0 = immer neu laden); `--refresh` erzwingt Neuabruf
 
 exports:
   # Meistgehörte Künstler/Titel. time_range: short_term (~4 Wochen), medium_term (~6 Monate), long_term (~1 Jahr)

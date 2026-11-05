@@ -151,3 +151,26 @@ def test_lastfm_http_cache_and_errors(tmp_path, monkeypatch):
     lf.save()
     lf2 = exporter.LastFm("key", tmp_path / "c.json", delay=0)  # Cache überlebt Neustart
     assert lf2.top_tags("Nobody") == [] and calls == ["Band A", "Nobody"]
+
+
+def test_disk_cache_avoids_second_fetch(tmp_path):
+    class Counting(FakeSP):
+        n = 0
+
+        def current_user_saved_tracks(self, limit):
+            Counting.n += 1
+            return super().current_user_saved_tracks(limit)
+
+    cp = tmp_path / "c.json"
+    first = exporter.Fetcher(Counting(), cache_path=cp, ttl=3600).liked_tracks()
+    # zweiter Lauf: kein Client nötig (Factory würde knallen), Daten kommen von der Platte
+    def boom():
+        raise AssertionError("Spotify-Client sollte nicht gebaut werden")
+    second = exporter.Fetcher(cache_path=cp, ttl=3600, sp_factory=boom).liked_tracks()
+    assert second == first and Counting.n == 1
+    # --refresh holt neu
+    exporter.Fetcher(Counting(), cache_path=cp, ttl=3600, refresh=True).liked_tracks()
+    assert Counting.n == 2
+    # ttl=0 schaltet Cache aus
+    exporter.Fetcher(Counting(), cache_path=cp, ttl=0).liked_tracks()
+    assert Counting.n == 3

@@ -52,15 +52,54 @@ def make_client(data_dir: Path):
 
 # ----------------------------------------------------------------- Daten holen
 class Fetcher:
-    """Holt Daten einmalig und merkt sie sich, damit mehrere Exporte sie wiederverwenden."""
+    """Holt Daten einmalig und merkt sie sich (im Speicher und optional auf der Platte).
 
-    def __init__(self, sp):
-        self.sp = sp
+    Disk-Cache: Rohdaten pro Abruf mit Zeitstempel; gültig `ttl` Sekunden, `refresh` ignoriert ihn."""
+
+    def __init__(self, sp=None, cache_path=None, ttl=0, refresh=False, sp_factory=None):
+        self._sp, self._sp_factory = sp, sp_factory  # Client erst bei Bedarf bauen -> kein Login bei vollem Cache
+        self.cache_path = Path(cache_path) if cache_path else None
+        self.ttl, self.refresh = ttl, refresh
         self._cache = {}
+        self._disk = {}
+        if self.cache_path and ttl > 0:
+            try:
+                self._disk = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
         self._artist_cache = {}
         self._batch_ok = True
         self._single_fail = 0
         self._logged_single_err = False
+
+    @property
+    def sp(self):
+        if self._sp is None:
+            self._sp = self._sp_factory()
+        return self._sp
+
+    def _memo(self, key, fn):
+        """Ergebnis aus Speicher, sonst aus Disk-Cache (frisch genug), sonst per fn() holen."""
+        if key in self._cache:
+            return self._cache[key]
+        entry = self._disk.get(key)
+        if entry and not self.refresh and time.time() - entry["ts"] < self.ttl:
+            age = int((time.time() - entry["ts"]) / 60)
+            log.info("Cache: %s (%d min alt)", key, age)
+            data = entry["data"]
+        else:
+            data = fn()
+            if self.cache_path and self.ttl > 0:
+                self._disk[key] = {"ts": time.time(), "data": data}
+                try:
+                    self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = self.cache_path.with_suffix(".tmp")
+                    tmp.write_text(json.dumps(self._disk, ensure_ascii=False), encoding="utf-8")
+                    tmp.replace(self.cache_path)
+                except OSError as exc:
+                    log.warning("Spotify-Cache nicht schreibbar: %s", exc)
+        self._cache[key] = data
+        return data
 
     def _paged(self, page):
         """Iteriert über alle Seiten eines Spotify-Paging-Objekts."""
@@ -69,25 +108,21 @@ class Fetcher:
             page = self.sp.next(page) if page.get("next") else None
 
     def top_artists(self, time_range, limit=50):
-        k = ("top_artists", time_range, limit)
-        if k not in self._cache:
-            self._cache[k] = list(self._paged(self.sp.current_user_top_artists(limit=min(limit, 50), time_range=time_range)))[:limit]
-            self.remember_artists(self._cache[k])
-            if self._cache[k] and not getattr(self, "_logged_fields", False):
-                self._logged_fields = True
-                first = self._cache[k][0]
-                n_gen = sum(1 for a in self._cache[k] if a.get("genres"))
-                log.info("Top-Artist-Felder: %s | %d von %d mit Genres", sorted(first), n_gen, len(self._cache[k]))
-        return self._cache[k]
+        data = self._memo(f"top_artists:{time_range}:{limit}", lambda: list(self._paged(
+            self.sp.current_user_top_artists(limit=min(limit, 50), time_range=time_range)))[:limit])
+        self.remember_artists(data)
+        if data and not getattr(self, "_logged_fields", False):
+            self._logged_fields = True
+            n_gen = sum(1 for a in data if a.get("genres"))
+            log.info("Top-Artist-Felder: %s | %d von %d mit Genres", sorted(data[0]), n_gen, len(data))
+        return data
 
     def top_tracks(self, time_range, limit=50):
-        k = ("top_tracks", time_range, limit)
-        if k not in self._cache:
-            self._cache[k] = list(self._paged(self.sp.current_user_top_tracks(limit=min(limit, 50), time_range=time_range)))[:limit]
-        return self._cache[k]
+        return self._memo(f"top_tracks:{time_range}:{limit}", lambda: list(self._paged(
+            self.sp.current_user_top_tracks(limit=min(limit, 50), time_range=time_range)))[:limit])
 
     def followed_artists(self):
-        if "followed" not in self._cache:
+        def fetch():
             out, after = [], None
             while True:
                 res = self.sp.current_user_followed_artists(limit=50, after=after)["artists"]
@@ -95,27 +130,27 @@ class Fetcher:
                 after = res.get("cursors", {}).get("after")
                 if not after or not res["items"]:
                     break
-            self.remember_artists(out)
-            self._cache["followed"] = out
-        return self._cache["followed"]
+            return out
+        data = self._memo("followed", fetch)
+        self.remember_artists(data)
+        return data
 
     def liked_tracks(self, limit=None):
-        k = ("liked", limit)
-        if k not in self._cache:
+        def fetch():
             out = []
             for rec in self._paged(self.sp.current_user_saved_tracks(limit=50)):
                 if rec.get("track"):
                     out.append({**rec["track"], "_added_at": rec.get("added_at", "")})
                 if limit and len(out) >= limit:
                     break
-            self._cache[k] = out
-        return self._cache[k]
+            return out
+        return self._memo(f"liked:{limit}", fetch)
 
     def playlists(self, own_only=True):
         """Liefert [(playlist_meta, [tracks])]. Playlists ohne lesbare Items werden übersprungen."""
-        k = ("playlists", own_only)
-        if k in self._cache:
-            return self._cache[k]
+        return self._memo(f"playlists:{own_only}", lambda: self._fetch_playlists(own_only))
+
+    def _fetch_playlists(self, own_only):
         me = self.sp.current_user()["id"]
         result = []
         for pl in self._paged(self.sp.current_user_playlists(limit=50)):
@@ -138,7 +173,6 @@ class Fetcher:
                 if t and t.get("id"):
                     tracks.append(t)
             result.append((pl, tracks))
-        self._cache[k] = result
         return result
 
     def remember_artists(self, artists):
@@ -455,6 +489,8 @@ def main():
     data_dir = Path(os.getenv("DATA_DIR", "/data"))
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--spec", default=str(data_dir / "spec.yaml"))
+    ap.add_argument("--refresh", action="store_true", default=os.getenv("REFRESH") == "1",
+                    help="Spotify-Cache ignorieren und alles neu abrufen (oder REFRESH=1)")
     args = ap.parse_args()
 
     spec_path = Path(args.spec)
@@ -465,7 +501,9 @@ def main():
         log.info("Keine Vorgabe gefunden - Beispiel nach %s kopiert und verwendet.", spec_path)
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
 
-    fetcher = Fetcher(make_client(data_dir))
+    ttl = float(spec.get("cache_hours", 24)) * 3600  # 0 = Cache aus
+    fetcher = Fetcher(cache_path=data_dir / ".spotify-cache.json", ttl=ttl, refresh=args.refresh,
+                      sp_factory=lambda: make_client(data_dir))
     if os.getenv("LASTFM_API_KEY"):
         fetcher.lastfm = LastFm(os.environ["LASTFM_API_KEY"], data_dir / ".lastfm-cache.json")
     written = run(spec, fetcher, data_dir / "out")
