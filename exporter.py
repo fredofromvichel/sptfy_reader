@@ -57,6 +57,7 @@ class Fetcher:
         self._artist_cache = {}
         self._batch_ok = True
         self._single_fail = 0
+        self._logged_single_err = False
 
     def _paged(self, page):
         """Iteriert über alle Seiten eines Spotify-Paging-Objekts."""
@@ -69,6 +70,11 @@ class Fetcher:
         if k not in self._cache:
             self._cache[k] = list(self._paged(self.sp.current_user_top_artists(limit=min(limit, 50), time_range=time_range)))[:limit]
             self.remember_artists(self._cache[k])
+            if self._cache[k] and not getattr(self, "_logged_fields", False):
+                self._logged_fields = True
+                first = self._cache[k][0]
+                n_gen = sum(1 for a in self._cache[k] if a.get("genres"))
+                log.info("Top-Artist-Felder: %s | %d von %d mit Genres", sorted(first), n_gen, len(self._cache[k]))
         return self._cache[k]
 
     def top_tracks(self, time_range, limit=50):
@@ -141,12 +147,17 @@ class Fetcher:
     def _artist_single(self, aid):
         from spotipy.exceptions import SpotifyException
         try:
-            return self.sp.artist(aid)
+            a = self.sp.artist(aid)
+            self._single_fail = 0
+            return a
         except SpotifyException as exc:
-            if exc.http_status in (403, 404):
-                self._single_fail += 1
-                return None
-            raise
+            if exc.http_status not in (403, 404, 429):
+                raise
+            self._single_fail += 1
+            if not self._logged_single_err:
+                self._logged_single_err = True
+                log.warning("Einzelabfrage /artists/{id} fehlgeschlagen: HTTP %s %s", exc.http_status, exc.msg)
+            return None
 
     def artists_by_id(self, ids, max_new=None):
         """Objekte (mit Genres) zu Artist-IDs. `ids` nach Wichtigkeit sortiert; max_new begrenzt Nachschlagungen.
@@ -173,8 +184,9 @@ class Fetcher:
                 res = []
                 for aid in chunk:
                     res.append(self._artist_single(aid))
-                    if self._single_fail >= 10 and not self._artist_cache:
-                        log.warning("Künstler-Abfragen werden abgelehnt (403) - Genres nur aus Top/Followed.")
+                    if self._single_fail >= 10:
+                        log.warning("Künstler-Abfragen werden abgelehnt - breche Nachschlagen ab (Genres nur aus Top/Followed).")
+                        self.remember_artists(res)
                         return {i: self._artist_cache[i] for i in ids if i in self._artist_cache}
             self.remember_artists(res)
         return {i: self._artist_cache[i] for i in ids if i in self._artist_cache}
@@ -182,7 +194,7 @@ class Fetcher:
 
 # ----------------------------------------------------------------- Exporte
 def _artists(track):
-    return ", ".join(a["name"] for a in track.get("artists", []))
+    return ", ".join(a.get("name") or "?" for a in track.get("artists") or [] if a)
 
 
 def export_top_artists(f, opt, time_range):
@@ -249,6 +261,7 @@ def export_genres(f, opt):
             sys.exit(f"genres: unbekannte Quelle '{src}'")
 
     info = f.artists_by_id([aid for aid, _ in weight.most_common()], opt.get("max_artist_lookups", 300))
+    log.info("Genre-Info vorhanden für %d von %d Künstlern", sum(1 for a in info.values() if a.get("genres")), len(weight))
     genre_w, genre_artists = Counter(), defaultdict(Counter)
     for aid, w in weight.items():
         a = info.get(aid)

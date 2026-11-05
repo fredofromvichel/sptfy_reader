@@ -61,6 +61,11 @@ class FakeSP:
     single_calls = []
 
 
+def test_artists_none_name():
+    t = {"artists": [{"id": "x", "name": None}, {"id": "y", "name": "Ok"}, None]}
+    assert exporter._artists(t) == "?, Ok"
+
+
 def test_full_run(tmp_path):
     spec = {
         "output_dir": str(tmp_path),
